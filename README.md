@@ -1,9 +1,8 @@
-Repository with the code for training and evaluating the models of our paper on score-informed music source separation [[1]](#references).
-The code is only to reproduce the results of the paper, any other use cases have not been tested. 
+Repository with the code for training and evaluating the models of our paper on score-informed music source separation [[1]](#references). For a sample of our results check the releases section, where we provide our score-only model's results for the String Quintet K515 song from the URMP dataset.
 
 The code is based on the MUSDB18 example of Asteroid for X-UMX, but with some modifications to
 make it work for orchestra music. It supports training on SynthSOD and evaluation
-in it and also in the Aalto anechoic orchestra recordings and on the URMP ensembles dataset.
+in it and also in the Aalto anechoic orchestra recordings and on the URMP ensembles dataset. The code is only to reproduce the results of the paper, any other use cases have not been tested. 
 
 The SynthSOD dataset can be downloaded from [Zenodo](https://doi.org/10.5281/zenodo.13759492) 
 and the code to generate it from the original [SOD MIDI files](https://qsdfo.github.io/LOP/database.html) 

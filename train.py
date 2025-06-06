@@ -137,8 +137,8 @@ def main(conf, args):
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         strategy="ddp_find_unused_parameters_true", #"ddp",
         devices="auto",
-        limit_train_batches=0.001,
-        limit_val_batches=0.01,
+        # limit_train_batches=0.001,
+        # limit_val_batches=0.01,
     )
 
     trainer.fit(system)

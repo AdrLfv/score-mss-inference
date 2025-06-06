@@ -76,6 +76,9 @@ data:
     - base
     # - wf
     # - ns
+    # - sil
+  plot_masks: no
+
 # Network config
 model:
   pretrained: null

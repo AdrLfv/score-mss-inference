@@ -17,9 +17,33 @@ from asteroid.complex_nn import torch_complex_from_magphase
 import os
 import sys
 import yaml
+import librosa
+import matplotlib.pyplot as plt
 
 from datasets import SynthSODDataset, AaltoAnechoicOrchestralDataset, URMPDataset
 from utils import load_model, prepare_parser_from_dict
+
+def silence_metric(est, gt, sr):
+    if np.count_nonzero(gt) == 0:
+        return float("nan"), float("nan")
+    remainder = est.shape[0] % sr
+    gt = gt[:est.shape[0]]
+    est = est[:-remainder].reshape((-1, sr))
+    gt = gt[:-remainder].reshape((-1, sr))
+    est_energy_nonsilent = []
+    est_energy_silent = []
+    gt_energy_nonsilent = []
+    for i in range(est.shape[0]):
+        if np.count_nonzero(gt[i]) == 0:
+            est_energy_silent.append(np.mean(np.power(est[i], 2)))
+        else:
+            est_energy_nonsilent.append(np.mean(np.power(est[i], 2)))
+            gt_energy_nonsilent.append(np.mean(np.power(gt[i], 2)))
+
+    median_energy_sil = np.median(est_energy_silent) if len(est_energy_silent) > 0 else float("nan")
+    median_energy = 10 * np.log10(median_energy_sil) if median_energy_sil != 0 else float("nan")
+    median_ratio = 10 * np.log10(median_energy_sil / np.median(gt_energy_nonsilent)) if len(gt_energy_nonsilent) > 0 and median_energy_sil != 0 else float("nan")
+    return median_energy, median_ratio
 
 def istft(X, rate=44100, n_fft=4096, n_hopsize=1024):
     # Literally taken from the original one on the asteroid MUSDB18 example.
@@ -291,7 +315,7 @@ def eval_main(
     minus_one=False,
     minus_one_model=False,
     minus_one_exclude_silences=False,
-    metrics=["base", "ns", "wf"]
+    metrics=["base", "ns", "wf", "sil"]
 ):
     """
     Modified from the original one on the asteroid MUSDB18 example:
@@ -304,6 +328,7 @@ def eval_main(
           base = SDR, SIR, SAR, ISR
           ns = no separation, ie. comparing the mix to the ground truth
           wf = wiener filter separation results before evaluation of base metrics
+          sil = silence metrics
     """
     if type(save_wavs) is bool:
         save_wavs = len(dataset) if save_wavs else 0
@@ -311,10 +336,12 @@ def eval_main(
     eval_base = "base" in metrics
     eval_ns = "ns" in metrics
     eval_wf = "wf" in metrics
+    eval_sil = "sil" in metrics
 
     if eval_base: results, fp = museval.EvalStore(), open(os.path.join(outdir, "results.txt"), "w")
     if eval_wf: results_wf, fp_wf = museval.EvalStore(), open(os.path.join(outdir, "results_wf.txt"), "w")
     if eval_ns: results_ns, fp_ns = museval.EvalStore(), open(os.path.join(outdir, "results_ns.txt"), "w")
+    if eval_sil: results_sil, fp_sil = np.zeros((2, len(targets), len(dataset))), open(os.path.join(outdir, "results_sil.txt"), "w")
 
     for i, item in enumerate(dataset):
         track, score = item if type(item) is tuple else (item, None)
@@ -323,6 +350,7 @@ def eval_main(
         if eval_base: print(track.folder, file=fp, flush=True)
         if eval_wf: print(track.folder, file=fp_wf, flush=True)
         if eval_ns: print(track.folder, file=fp_ns, flush=True)
+        if eval_sil: print(track.folder, file=fp_sil, flush=True)
 
         if eval_ns: estimates_ns = fake_separation(track.audio, targets)
         estimates, estimates_wf = separate(track.audio, models, targets, niter=niter, alpha=alpha, softmask=softmask, residual_model=residual_model, device=device, score=score, wiener=eval_wf)
@@ -333,6 +361,13 @@ def eval_main(
                 if np.allclose(gt.audio[win], 0, atol=1e-2):
                     gt.audio[win] = 0
         
+        if eval_sil:
+            print("silence metrics", file=fp_sil)
+            for j, (target, estimate) in enumerate(estimates.items()):
+                results_sil[:, j, i] = silence_metric(estimate, track.targets[target].audio, samplerate)
+                print(f"{target:20s} median_energy: {results_sil[0, j, i]:.4f}  median_ratio: {results_sil[1, j, i]:.4f}".replace("nan", "nan     "), file=fp_sil)
+            print(file=fp_sil)
+
         if group_families:
             track = group_families_track(track)
             if eval_base: estimates = group_families_estimates(estimates)
@@ -397,6 +432,81 @@ def eval_main(
         results_ns.frames_agg = "mean"
         print(results_ns, file=fp_ns, flush=True)
         fp_ns.close()
+
+    if eval_sil:
+        print("mean over songs", file=fp_sil)
+        for i, target in enumerate(targets):
+            print(f"{target:20s} median_energy: {np.nanmean(results_sil[0, i]):.4f}  median_ratio: {np.nanmean(results_sil[1, i]):.4f}".replace("nan", "nan     "), file=fp_sil)
+
+        print("\nmedian over songs, exact zero", file=fp_sil)
+        for i, target in enumerate(targets):
+            print(f"{target:20s} median_energy: {np.nanmedian(results_sil[0, i]):.4f}  median_ratio: {np.nanmedian(results_sil[1, i]):.4f}".replace("nan", "nan     "), file=fp_sil)
+
+        fp_sil.close()
+
+
+def plot_masks(dataset, models, outdir):
+    for i, item in enumerate(dataset):
+        track, score = item if type(item) is tuple else (item, None)
+
+        audio_torch = torch.tensor(track.audio.T[None, ...]).float()
+
+        models[0].encoder.cpu()
+        spec_mag, spec_phase = models[0].encoder(audio_torch)
+
+        max_frames_for_gpu = 1024
+
+        for i, model in enumerate(models):
+            masked_mixture_segs = []
+            for frame_idx in range(spec_mag.shape[0] // max_frames_for_gpu + 1):
+                audio_mag_seg = spec_mag[frame_idx*max_frames_for_gpu: min((frame_idx+1)*max_frames_for_gpu, spec_mag.shape[0]), ...].to(device)
+                if score is not None and len(score) > 0:
+                    scores = [score[source] for source in model.sources]
+                    score_tensor = torch.from_numpy(np.array(scores))[None, ...]
+                    score_seg = score_tensor[:, :, frame_idx*max_frames_for_gpu: min((frame_idx+1)*max_frames_for_gpu, score_tensor.shape[2]) :].to(device)
+                    if "noaudio" in model.architecture:
+                        est_masks_seg = model.forward_masker(score_seg.clone())
+                    else:
+                        est_masks_seg = model.forward_masker(audio_mag_seg.clone(), score_seg.clone())
+                else:
+                    est_masks_seg = model.forward_masker(audio_mag_seg.clone())
+
+                masked_mixture_segs.append( model.apply_masks(audio_mag_seg, est_masks_seg).cpu().detach() )
+            masked_mixture = torch.concatenate(masked_mixture_segs, axis=1)
+
+            for j, mask in enumerate(est_masks_seg):
+                mask = mask.squeeze().detach().numpy()
+                inst = model.sources[j]
+                if np.count_nonzero(track.targets[inst].audio) == 0: continue
+                n_freq_bins = 512
+
+                fig, axs = plt.subplots(3)
+
+                if score is not None:
+                    librosa.display.specshow(scores[j].numpy().T, x_axis="time", sr=44100, hop_length=1024, ax=axs[0])
+                    axs[0].set(yticks=np.arange(0, 128, 25))
+                    axs[0].set_title("Score")
+                    axs[0].set_xlabel("Time (s)")
+                    axs[0].set_ylabel("MIDI pitch")
+
+                mask = librosa.amplitude_to_db(mask.T[:n_freq_bins], ref=np.max)
+                librosa.display.specshow(mask, x_axis="time", sr=44100, hop_length=1024, ax=axs[1], vmin=-20, vmax=0)
+                axs[1].set_title(f"{model.architecture} mask")
+                axs[1].set_xlabel("Time (s)")
+                axs[1].set_ylabel("Frequency (Hz)")
+                axs[1].set_yticks([0, 93, 186, 279, 372, 465], labels=[0, 1000, 2000, 3000, 4000, 5000]) #This is bad but ig it works, these are the closest ticks to even thousand freqs
+
+                target_audio = track.targets[inst].audio.T
+                target_spec = librosa.amplitude_to_db(np.abs(librosa.stft(target_audio, n_fft=4096, hop_length=1024).squeeze()), ref=np.max)[:n_freq_bins]
+                librosa.display.specshow(target_spec, x_axis="time", sr=44100, hop_length=1024, ax=axs[2], vmin=-80, vmax=0)
+                axs[2].set_title(f"Ground truth spectrogram")
+                axs[2].set_xlabel("Time (s)")
+                axs[2].set_ylabel("Frequency (Hz)")
+                axs[2].set_yticks([0, 93, 186, 279, 372, 465], labels=[0, 1000, 2000, 3000, 4000, 5000])
+
+                filename = f"{outdir}/{inst}-mask.png"
+                fig.savefig(filename)
+                print(f"Wrote {filename}", file=sys.stderr)
 
 
 if __name__ == "__main__":
@@ -568,48 +678,84 @@ if __name__ == "__main__":
             metrics=args.metrics
         )
     
-    # you can use song:<song_name> to eval a specific song from synthsod
+    # you can use song:<dataset>:<song_name>:<start_time>:<end_time> to eval a clip of a specific song
     if 'song:' in args.eval_on[0]:
-        songname = args.eval_on[0].split(":")[1]
+        toks = args.eval_on[0].split(":")
+        dataset = toks[1]
+        songname = toks[2]
+        start = int(toks[3]) if len(toks) > 3 else None
+        end = int(toks[4]) if len(toks) > 3 else None
         outdir = os.path.join(os.path.abspath(args.outdir), f"EvaluateResults_{songname}" +
                               ("_group_families" if args.group_families else "") + ("_minus_one" if args.minus_one else ""))
         Path(outdir).mkdir(exist_ok=True, parents=True)
         print(f"Evaluating models on song: {songname}", file=sys.stderr)
         print("Evaluated results will be saved in:\n {}".format(outdir), file=sys.stderr)
-        test_dataset = SynthSODDataset(
-            metadata_file_path=args.synthsod_dataset_path + '/SynthSOD_metadata_aligned_all.json',
-            synthsod_data_path=args.synthsod_dataset_path + '/SynthSOD_data/',
-            score_data_path=args.synthsod_dataset_path + '/score_data',
-            window_size=args.window_length,
-            hop_size=args.nhop,
-            center=True,
-            n_fft=args.in_chan,
-            sources=args.sources,
-            targets=targets,
-            convert_to_mono=(args.nb_channels == 1),
-            join_violins=args.join_violins,
-            segment=0,
-            sample_rate=args.sample_rate,
-            fake_musdb_format=True,
-            max_duration=30*60,
-            eval=True, 
-            eval_song=songname
-        )
-        eval_main(
-            models,
-            targets,
-            test_dataset,
-            samplerate=args.samplerate,
-            alpha=args.alpha,
-            softmask=args.softmask,
-            niter=args.niter,
-            residual_model=args.residual_model,
-            outdir=outdir,
-            save_wavs=20,
-            group_families=args.group_families,
-            minus_one=args.minus_one,
-            minus_one_model=args.minus_one_model,
-            minus_one_exclude_silences=args.exclude_silences,
-            metrics=args.metrics
-        )
-        
+        if dataset == "synthsod":
+            test_dataset = SynthSODDataset(
+                metadata_file_path=args.synthsod_dataset_path + '/SynthSOD_metadata_aligned_all.json',
+                synthsod_data_path=args.synthsod_dataset_path + '/SynthSOD_data/',
+                score_data_path=args.synthsod_dataset_path + '/score_data',
+                window_size=args.window_length,
+                hop_size=args.nhop,
+                center=True,
+                n_fft=args.in_chan,
+                sources=args.sources,
+                targets=targets,
+                convert_to_mono=(args.nb_channels == 1),
+                join_violins=args.join_violins,
+                segment=0,
+                sample_rate=args.sample_rate,
+                fake_musdb_format=True,
+                max_duration=30*60,
+                use_score="noscore" not in args.architecture,
+                eval=True,
+                eval_song=songname,
+                times=(start,end)
+            )
+        elif dataset == "aalto":
+            test_dataset = AaltoAnechoicOrchestralDataset(
+                args.aalto_dataset_path,
+                sample_rate=args.sample_rate,
+                use_score=args.architecture != "noscore",
+                window_size=args.window_length,
+                hop_size=args.nhop,
+                center=True,
+                n_fft=args.in_chan,
+                eval_song=songname,
+                times=(start,end)
+                )
+        elif dataset == "urmp":
+            test_dataset = URMPDataset(
+                args.urmp_dataset_path,
+                sample_rate=args.sample_rate,
+                use_score=args.architecture != "noscore",
+                window_size=args.window_length,
+                hop_size=args.nhop,
+                center=True,
+                n_fft=args.in_chan,
+                targets=targets,
+                eval_song=songname,
+                times=(start,end),
+                eval=True
+            )
+
+        if args.plot_masks:
+            plot_masks(test_dataset, models, outdir)
+        else:
+            eval_main(
+                models,
+                targets,
+                test_dataset,
+                samplerate=args.samplerate,
+                alpha=args.alpha,
+                softmask=args.softmask,
+                niter=args.niter,
+                residual_model=args.residual_model,
+                outdir=outdir,
+                save_wavs=20,
+                group_families=args.group_families,
+                minus_one=args.minus_one,
+                minus_one_model=args.minus_one_model,
+                minus_one_exclude_silences=args.exclude_silences,
+                metrics=args.metrics,
+            )

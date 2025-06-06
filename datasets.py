@@ -113,7 +113,8 @@ class SynthSODDataset(torch.utils.data.Dataset):
         size_limit=None,
         eval=False,
         eval_song=None,
-        use_score=False
+        use_score=False,
+        times=(None, None)
     ):
         assert not (fixed_segments and random_track_mix)
         assert not (mix_only and fake_musdb_format)
@@ -191,6 +192,7 @@ class SynthSODDataset(torch.utils.data.Dataset):
         self.center = center
         self.n_fft = n_fft
         self.eval = eval
+        self.times = times
 
 
     def __getitem__(self, index):
@@ -270,6 +272,7 @@ class SynthSODDataset(torch.utils.data.Dataset):
 
     def get_track_segment(self, track_idx):
         """Return the segment of the track to load"""
+        if self.times[0] is not None: return self.times[0]*self.sample_rate, self.times[1]*self.sample_rate
         track_info = sf.info(list(self.tracks[track_idx].values())[0])  # Get the path of the first source (all sources have the same length)
         track_len = track_info.frames
         if self.segment is None or self.segment == 0 or not self.random_segments: return 0, track_len
@@ -343,6 +346,8 @@ class AaltoAnechoicOrchestralDataset(torch.utils.data.Dataset):
                  hop_size=1024,
                  center=True,
                  n_fft=4096,
+                 eval_song=None,
+                 times=(None, None)
                  ):
 
         self.sod2aalto = {'Bass': ['doublebass'],
@@ -379,6 +384,8 @@ class AaltoAnechoicOrchestralDataset(torch.utils.data.Dataset):
         self.hop_size = hop_size
         self.center = center
         self.n_fft = n_fft
+        self.eval_song = eval_song
+        self.times = times
 
         self.tracks = list(self.get_tracks(root_path))
         if not self.tracks:
@@ -395,10 +402,14 @@ class AaltoAnechoicOrchestralDataset(torch.utils.data.Dataset):
 
         for track_path in tqdm.tqdm(p.iterdir()):
             if track_path.is_dir():
+                if self.eval_song is not None and track_path.stem != self.eval_song: continue
                 fake_musdb_track = None
                 for inst_path in track_path.iterdir():
                     if inst_path.suffix == ".wav":
-                        signal, fs = sf.read(str(inst_path), always_2d=True)
+                        if self.times[0] is None:
+                            signal, fs = sf.read(str(inst_path), always_2d=True)
+                        else:
+                            signal, fs = sf.read(str(inst_path), always_2d=True, start=self.times[0]*self.sample_rate, stop=self.times[1]*self.sample_rate)
                         if fs != self.sample_rate:
                             signal = librosa.resample(signal.T, orig_sr=fs, target_sr=self.sample_rate, res_type='polyphase').T
                         if fake_musdb_track is None:
@@ -422,7 +433,10 @@ class AaltoAnechoicOrchestralDataset(torch.utils.data.Dataset):
                             for instrument in instruments:
                                 score_path = root_path + '/annotations/' + fake_musdb_track.name + '/' + instrument + '.txt'
                                 try:
-                                    scores[target] += piano_roll(self.get_score(score_path), self.window_size, self.hop_size, self.sample_rate, self.center, self.n_fft, fake_musdb_track.audio.shape[0], 0)
+                                    if self.times[0] is None:
+                                        scores[target] += piano_roll(self.get_score(score_path), self.window_size, self.hop_size, self.sample_rate, self.center, self.n_fft, fake_musdb_track.audio.shape[0], 0)
+                                    else:
+                                        scores[target] += piano_roll(self.get_score(score_path, start=self.times[0], end=self.times[1]), self.window_size, self.hop_size, self.sample_rate, self.center, self.n_fft, fake_musdb_track.audio.shape[0], self.times[0]*self.sample_rate)
                                 except FileNotFoundError:
                                     continue
                             scores[target] = np.clip(scores[target], 0, 1)
@@ -478,6 +492,8 @@ class URMPDataset(torch.utils.data.Dataset):
                  hop_size=1024,
                  center=True,
                  n_fft=4096,
+                 eval_song=None,
+                 times=(None, None)
                  ):
 
         if score_data_path is not None:
@@ -537,6 +553,8 @@ class URMPDataset(torch.utils.data.Dataset):
         self.hop_size = hop_size
         self.center = center
         self.n_fft = n_fft
+        self.eval_song = eval_song
+        self.times = times
 
         self.tracks = list(self.get_tracks(root_path))
         if not self.tracks:
@@ -554,12 +572,15 @@ class URMPDataset(torch.utils.data.Dataset):
         for track_path in tqdm.tqdm(p.iterdir()):
             scores = {}
             if track_path.is_dir():
-                if self.exclude_saxophone_tracks and '_sax' in track_path.stem:
-                    continue
+                if self.eval_song is not None and self.eval_song != track_path.stem: continue
+                if self.exclude_saxophone_tracks and '_sax' in track_path.stem: continue
                 fake_musdb_track = None
                 for inst_path in sorted(track_path.iterdir()):
                     if inst_path.stem[:6] == "AuSep_" and inst_path.stem[-7:] == "cleaned" and inst_path.suffix == ".wav":
-                        signal, fs = sf.read(str(inst_path), always_2d=True)
+                        if self.times[0] is None:
+                            signal, fs = sf.read(str(inst_path), always_2d=True)
+                        else:
+                            signal, fs = sf.read(str(inst_path), always_2d=True, start=self.times[0]*self.sample_rate, stop=self.times[1]*self.sample_rate)
                         if fs != self.sample_rate:
                             signal = librosa.resample(signal.T, orig_sr=fs, target_sr=self.sample_rate, res_type='polyphase').T
                             fs = self.sample_rate
@@ -577,7 +598,11 @@ class URMPDataset(torch.utils.data.Dataset):
                         inst = self.urmp2sod[inst_path.stem.split('_')[2]]
                         if inst not in scores:
                             scores[inst] = piano_roll([], self.window_size, self.hop_size, self.sample_rate, self.center, self.n_fft, fake_musdb_track.audio.shape[0], 0)
-                        scores[inst] += piano_roll(self.get_score(inst_path), self.window_size, self.hop_size, self.sample_rate, self.center, self.n_fft, fake_musdb_track.audio.shape[0], 0)
+
+                        if self.times[0] is None:
+                            scores[inst] += piano_roll(self.get_score(inst_path), self.window_size, self.hop_size, self.sample_rate, self.center, self.n_fft, fake_musdb_track.audio.shape[0], 0)
+                        else:
+                            scores[inst] += piano_roll(self.get_score(inst_path, start=self.times[0], end=self.times[1]), self.window_size, self.hop_size, self.sample_rate, self.center, self.n_fft, fake_musdb_track.audio.shape[0], self.times[0]*self.sample_rate)
                         scores[inst] = np.clip(scores[inst], 0, 1)
 
                 if fake_musdb_track is None or (self.exclude_single_instrument_tracks and len(fake_musdb_track.instruments) == 1):

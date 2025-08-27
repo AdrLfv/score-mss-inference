@@ -1,0 +1,12 @@
+torch==2.8.0
+numpy==2.2.6
+soundfile==0.13.1
+museval==0.4.1
+norbert==0.2.1
+scipy==1.15.3
+asteroid==0.7.0
+PyYAML==6.0.2
+librosa==0.11.0
+matplotlib==3.10.5
+scikit-learn==1.7.1
+tqdm==4.67.1

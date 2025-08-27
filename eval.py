@@ -114,7 +114,7 @@ def separate(
     """
 
     # convert numpy audio to torch
-    audio_torch = torch.tensor(audio.T[None, ...]).float()
+    audio_torch = torch.tensor(audio).float().T.unsqueeze(0)
 
     # STFT (all the models have the same STFT encoder)
     models[0].encoder.cpu()
@@ -129,7 +129,9 @@ def separate(
             audio_mag_seg = spec_mag[frame_idx*max_frames_for_gpu: min((frame_idx+1)*max_frames_for_gpu, spec_mag.shape[0]), ...].to(device)
             if score is not None and len(score) > 0:
                 scores = [score[source] for source in model.sources]
-                score_tensor = torch.from_numpy(np.array(scores))[None, ...]
+                max_len = max(s.shape[-1] for s in scores)
+                scores = [np.pad(s, [(0, 0)] * (s.ndim - 1) + [(0, max_len - s.shape[-1])]) for s in scores]
+                score_tensor = torch.from_numpy(np.array(scores, dtype=np.float32))[None, ...]
                 score_seg = score_tensor[:, :, frame_idx*max_frames_for_gpu: min((frame_idx+1)*max_frames_for_gpu, score_tensor.shape[2]) :].to(device)
                 if "noaudio" in model.architecture:
                     est_masks_seg = model.forward_masker(score_seg.clone())
@@ -395,10 +397,18 @@ def eval_main(
             save_wavs -= 1
 
         if eval_base:
-            track_scores = museval.eval_mus_track(track, estimates)
-            results.add_track(track_scores.df)
-            print(track_scores, file=sys.stderr)
-            print(track_scores, file=fp, flush=True)
+            silent_track_found = False
+            for target_name, target_data in track.targets.items():
+                if np.all(target_data.audio == 0):
+                    print(f"Skipping evaluation for {track.folder} because target '{target_name}' is silent.", file=sys.stderr)
+                    silent_track_found = True
+                    break
+            
+            if not silent_track_found:
+                track_scores = museval.eval_mus_track(track, estimates)
+                results.add_track(track_scores.df)
+                print(track_scores, file=sys.stderr)
+                print(track_scores, file=fp, flush=True)
 
         if eval_wf:
             track_scores_wf = museval.eval_mus_track(track, estimates_wf)

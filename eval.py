@@ -114,7 +114,7 @@ def separate(
     """
 
     # convert numpy audio to torch
-    audio_torch = torch.tensor(audio.T[None, ...]).float()
+    audio_torch = torch.tensor(audio).float().T.unsqueeze(0)
 
     # STFT (all the models have the same STFT encoder)
     models[0].encoder.cpu()

@@ -1,0 +1,12 @@
+torch
+numpy
+soundfile
+museval
+norbert
+scipy
+asteroid
+PyYAML
+librosa
+matplotlib
+scikit-learn
+tqdm

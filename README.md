@@ -65,6 +65,19 @@ The model names in the paper and the code differ. The baseline model of the pape
 ```bash
 run_training_strings.sh --architecture noscore
 ```
+
+## Inference
+
+You can use the `run_inference.sh` script to perform inference on a single audio file. The script will separate the audio file into the different instruments and save them in the specified output directory.
+
+```bash
+./run_inference.sh \
+    --input-file /path/to/your/input.wav \
+    --model-path checkpoints/pretrained_models/exp/train_xumx_synthsod_input_concat_woodwinds/best_model.pth \
+    --instruments woodwinds \
+    --output-dir exp
+```
+
 ## Evaluation
 
 You can evaluate the models on the datasets by running the following script:
